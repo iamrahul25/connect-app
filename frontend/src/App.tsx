@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 type Status = 'disconnected' | 'idle' | 'waiting' | 'matched'
 
@@ -18,7 +18,18 @@ type ServerPayload = {
   data?: SignalPayload
 }
 
-const WS_URL = 'ws://localhost:8080'
+const WS_PORT = '8080'
+
+function resolveWsUrl() {
+  const envUrl = import.meta.env.VITE_WS_URL as string | undefined
+  if (envUrl && envUrl.trim()) {
+    return envUrl.trim()
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.hostname || 'localhost'
+  return `${protocol}//${host}:${WS_PORT}`
+}
 
 function App() {
   const socketRef = useRef<WebSocket | null>(null)
@@ -27,6 +38,7 @@ function App() {
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const localVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null)
+  const hasStartedRef = useRef(false)
 
   const [status, setStatus] = useState<Status>('disconnected')
   const [note, setNote] = useState('Connecting to lobby server...')
@@ -35,36 +47,16 @@ function App() {
   const [hasStarted, setHasStarted] = useState(false)
   const [isCallConnected, setIsCallConnected] = useState(false)
   const [myUserId, setMyUserId] = useState('Assigning...')
-  const [strangerUserId, setStrangerUserId] = useState('None')
+  const [strangerUserId, setStrangerUserId] = useState('Waiting...')
   const [onlineUsers, setOnlineUsers] = useState(0)
   const [waitingUsers, setWaitingUsers] = useState(0)
 
-  const isConnectingCall = status === 'matched' && !isCallConnected
-  const isBusy = status === 'disconnected' || status === 'waiting' || isConnectingCall
+  const isQueueing = status === 'waiting'
+  const isConnecting = status === 'matched' && !isCallConnected
 
-  const stageText = useMemo(() => {
-    if (status === 'disconnected') {
-      return 'Connecting to lobby...'
-    }
-
-    if (!hasStarted) {
-      return 'In lobby. Press Start to join queue.'
-    }
-
-    if (status === 'waiting') {
-      return 'Queued in lobby. Finding a stranger...'
-    }
-
-    if (isConnectingCall) {
-      return 'Stranger found. Connecting video...'
-    }
-
-    if (status === 'matched' && isCallConnected) {
-      return 'Call is live.'
-    }
-
-    return 'Ready in lobby.'
-  }, [hasStarted, isCallConnected, isConnectingCall, status])
+  useEffect(() => {
+    hasStartedRef.current = hasStarted
+  }, [hasStarted])
 
   const attachLocalPreview = () => {
     if (localVideoRef.current) {
@@ -80,15 +72,16 @@ function App() {
 
   const ensureSocket = () => {
     const existing = socketRef.current
-    if (existing && existing.readyState !== WebSocket.CLOSED) {
+    if (existing && existing.readyState < WebSocket.CLOSING) {
       return existing
     }
 
-    const ws = new WebSocket(WS_URL)
+    const wsUrl = resolveWsUrl()
+    const ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
       setStatus('idle')
-      setNote('Connected. You are in the lobby.')
+      setNote(`Connected to lobby (${wsUrl}). Press Start Calling.`)
     }
 
     ws.onmessage = async (event) => {
@@ -115,7 +108,7 @@ function App() {
         setStatus('waiting')
         setIsCallConnected(false)
         setStrangerUserId('Searching...')
-        setNote('Waiting in lobby queue for an available stranger.')
+        setNote('Waiting in lobby queue...')
         return
       }
 
@@ -124,7 +117,7 @@ function App() {
         setIsCallConnected(false)
         setHasStarted(true)
         setStrangerUserId(payload.strangerId ?? 'Unknown')
-        setNote(`Matched with ${payload.strangerId ?? 'a stranger'}. Establishing secure connection...`)
+        setNote(`Matched with ${payload.strangerId ?? 'a stranger'}. Connecting video...`)
         await beginPeerConnection(Boolean(payload.initiator))
         return
       }
@@ -139,30 +132,37 @@ function App() {
         setStatus('idle')
         setHasStarted(false)
         setIsCallConnected(false)
-        setStrangerUserId('None')
-        setNote('You left queue and returned to lobby.')
+        setStrangerUserId('Waiting...')
+        setNote('Returned to lobby.')
         return
       }
 
       if (payload.type === 'system') {
         closePeerConnection()
         setIsCallConnected(false)
-        if (hasStarted) {
+        if (hasStartedRef.current) {
           setStatus('waiting')
           setStrangerUserId('Searching...')
         } else {
           setStatus('idle')
+          setStrangerUserId('Waiting...')
         }
-        setNote(payload.text ?? 'Lobby update received.')
+        setNote(payload.text ?? 'Queue updated.')
       }
+    }
+
+    ws.onerror = () => {
+      setStatus('disconnected')
+      setNote(`Unable to connect to ${wsUrl}. Check backend and VITE_WS_URL.`)
     }
 
     ws.onclose = () => {
       closePeerConnection()
       setStatus('disconnected')
+      setHasStarted(false)
       setIsCallConnected(false)
-      setStrangerUserId('None')
-      setNote('Disconnected from lobby server. Refresh to reconnect.')
+      setStrangerUserId('Waiting...')
+      setNote(`Server disconnected (${wsUrl}). Refresh to reconnect.`)
     }
 
     socketRef.current = ws
@@ -254,7 +254,7 @@ function App() {
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') {
         setIsCallConnected(true)
-        setNote('Video call connected.')
+        setNote('Call connected.')
       }
 
       if (
@@ -309,10 +309,11 @@ function App() {
     try {
       await ensureLocalMedia()
       setHasStarted(true)
-      setNote('Joining lobby queue...')
+      setStatus('waiting')
+      setNote('Finding a stranger...')
       sendSocketMessage({ type: 'join' })
     } catch {
-      setNote('Camera/mic permission denied. Enable permissions and try again.')
+      setNote('Camera/mic permission denied.')
     }
   }
 
@@ -320,21 +321,24 @@ function App() {
     try {
       await ensureLocalMedia()
       setHasStarted(true)
+      setStatus('waiting')
       setIsCallConnected(false)
       closePeerConnection()
-      setNote('Switching to the next stranger...')
+      setStrangerUserId('Searching...')
+      setNote('Skipping to next stranger...')
       sendSocketMessage({ type: 'next' })
     } catch {
       setNote('Camera/mic permission is required.')
     }
   }
 
-  const leave = () => {
+  const backToLobby = () => {
     closePeerConnection()
     setHasStarted(false)
+    setStatus('idle')
     setIsCallConnected(false)
-    setStrangerUserId('None')
-    setNote('Returned to lobby.')
+    setStrangerUserId('Waiting...')
+    setNote('In lobby.')
     sendSocketMessage({ type: 'leave' })
   }
 
@@ -361,7 +365,12 @@ function App() {
       closePeerConnection()
       localStreamRef.current?.getTracks().forEach((track) => track.stop())
       localStreamRef.current = null
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      const state = ws.readyState
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onerror = null
+      ws.onclose = null
+      if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
         ws.close()
       }
     }
@@ -371,67 +380,89 @@ function App() {
     attachLocalPreview()
   }, [isMuted, isCameraOff])
 
-  return (
-    <main className="ometv-app">
-      <section className="shell">
-        <aside className="lobby">
-          <h1>OmeTV Lobby</h1>
-          <p className="lobby-subtitle">Random video chat with auto-next matching.</p>
+  useEffect(() => {
+    if (!hasStarted) {
+      return
+    }
 
-          <div className="stats">
-            <div className="stat-card">
-              <span>Total Online</span>
+    // When UI switches from lobby to call page, refs mount after local media may already exist.
+    // Re-attach streams so local/remote videos become visible immediately.
+    attachLocalPreview()
+    attachRemotePreview()
+  }, [hasStarted, status])
+
+  if (!hasStarted) {
+    return (
+      <main className="lobby-page">
+        <section className="lobby-card">
+          <h1>Oolo TV</h1>
+          <p className="lobby-subtitle">Connect with random people around the world</p>
+
+          <div className="lobby-id-row">
+            <span>Your ID: {myUserId}</span>
+          </div>
+
+          <div className="lobby-stats">
+            <article className="stat online">
               <strong>{onlineUsers}</strong>
-            </div>
-            <div className="stat-card">
-              <span>Waiting In Lobby</span>
+              <span>Online Users</span>
+            </article>
+            <article className="stat waiting">
               <strong>{waitingUsers}</strong>
-            </div>
-          </div>
-
-          <div className="ids">
-            <p>Your ID: {myUserId}</p>
-            <p>Stranger ID: {strangerUserId}</p>
-          </div>
-
-          <p className="stage">{stageText}</p>
-          <p className={`note ${isBusy ? 'loading' : ''}`}>{note}</p>
-
-          <div className="main-actions">
-            <button type="button" onClick={start}>
-              Start
-            </button>
-            <button type="button" onClick={leave}>
-              Back To Lobby
-            </button>
-          </div>
-        </aside>
-
-        <section className="call-area">
-          <div className="video-grid">
-            <article className="video-card">
-              <h2>You</h2>
-              <video ref={localVideoRef} autoPlay muted playsInline />
-            </article>
-            <article className="video-card">
-              <h2>Stranger</h2>
-              <video ref={remoteVideoRef} autoPlay playsInline />
+              <span>Waiting In Lobby</span>
             </article>
           </div>
 
-          <div className="call-actions">
-            <button type="button" onClick={next}>
-              Next
-            </button>
-            <button type="button" onClick={toggleMute}>
-              {isMuted ? 'Unmute' : 'Mute'}
-            </button>
-            <button type="button" onClick={toggleCamera}>
-              {isCameraOff ? 'Camera On' : 'Camera Off'}
-            </button>
-          </div>
+          <p className="lobby-note">{status === 'disconnected' ? 'Connecting to server...' : note}</p>
+
+          <button type="button" onClick={start} disabled={status === 'disconnected'} className="start-btn">
+            Start Calling
+          </button>
         </section>
+      </main>
+    )
+  }
+
+  return (
+    <main className="call-page">
+      <header className="call-top">
+        <p>Me: {myUserId}</p>
+        <p>Stranger: {strangerUserId}</p>
+        <p>Lobby Waiting: {waitingUsers}</p>
+      </header>
+
+      <section className="video-stage">
+        <div className="video-panel">
+          <video ref={remoteVideoRef} autoPlay playsInline />
+          <span className="video-label">Stranger</span>
+          {(isQueueing || isConnecting) && (
+            <div className="stage-overlay">
+              <h2>{isQueueing ? 'Finding Stranger...' : 'Connecting Call...'}</h2>
+              <p>{note}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="video-panel">
+          <video ref={localVideoRef} autoPlay muted playsInline />
+          <span className="video-label">You</span>
+        </div>
       </section>
+
+      <footer className="call-controls">
+        <button type="button" onClick={toggleMute}>
+          {isMuted ? 'Unmute' : 'Mute'}
+        </button>
+        <button type="button" onClick={toggleCamera}>
+          {isCameraOff ? 'Camera On' : 'Camera Off'}
+        </button>
+        <button type="button" onClick={next}>
+          Next
+        </button>
+        <button type="button" onClick={backToLobby} className="danger">
+          Back To Lobby
+        </button>
+      </footer>
     </main>
   )
 }
