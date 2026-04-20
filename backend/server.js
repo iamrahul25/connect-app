@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws'
+import 'dotenv/config'
 
 const PORT = Number(process.env.PORT ?? 8080)
 const wss = new WebSocketServer({ port: PORT })
