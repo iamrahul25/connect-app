@@ -1,8 +1,24 @@
 import { WebSocketServer } from 'ws'
 import 'dotenv/config'
+import http from 'node:http'
 
 const PORT = Number(process.env.PORT ?? 8080)
-const wss = new WebSocketServer({ port: PORT })
+
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end(`Backend is running on PORT ${PORT}`)
+    return
+  }
+
+  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+  res.end('Not found')
+})
+
+const wss = new WebSocketServer({ server })
+wss.on('error', (error) => {
+  console.error('WebSocket server error:', error)
+})
 
 const waitingQueue = []
 const peers = new Map()
@@ -202,4 +218,11 @@ wss.on('connection', (ws) => {
   })
 })
 
-console.log(`Omegle clone backend running on ws://localhost:${PORT}`)
+server.on('error', (error) => {
+  console.error('HTTP server error:', error)
+})
+
+server.listen(PORT, () => {
+  console.log(`Omegle clone backend running on ws://localhost:${PORT}`)
+  console.log(`Health check available at http://localhost:${PORT}/health`)
+})
