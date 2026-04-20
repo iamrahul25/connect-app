@@ -70,6 +70,27 @@ function App() {
     }
   }
 
+  const closePeerConnection = () => {
+    if (peerRef.current) {
+      peerRef.current.ontrack = null
+      peerRef.current.onicecandidate = null
+      peerRef.current.onconnectionstatechange = null
+      peerRef.current.close()
+      peerRef.current = null
+    }
+
+    remoteStreamRef.current = null
+    attachRemotePreview()
+  }
+
+  const stopLocalMedia = () => {
+    localStreamRef.current?.getTracks().forEach((track) => track.stop())
+    localStreamRef.current = null
+    setIsMuted(false)
+    setIsCameraOff(false)
+    attachLocalPreview()
+  }
+
   const ensureSocket = () => {
     const existing = socketRef.current
     if (existing && existing.readyState < WebSocket.CLOSING) {
@@ -129,6 +150,7 @@ function App() {
 
       if (payload.type === 'idle') {
         closePeerConnection()
+        stopLocalMedia()
         setStatus('idle')
         setHasStarted(false)
         setIsCallConnected(false)
@@ -158,6 +180,7 @@ function App() {
 
     ws.onclose = () => {
       closePeerConnection()
+      stopLocalMedia()
       setStatus('disconnected')
       setHasStarted(false)
       setIsCallConnected(false)
@@ -199,19 +222,6 @@ function App() {
 
     localStreamRef.current = stream
     attachLocalPreview()
-  }
-
-  const closePeerConnection = () => {
-    if (peerRef.current) {
-      peerRef.current.ontrack = null
-      peerRef.current.onicecandidate = null
-      peerRef.current.onconnectionstatechange = null
-      peerRef.current.close()
-      peerRef.current = null
-    }
-
-    remoteStreamRef.current = null
-    attachRemotePreview()
   }
 
   const beginPeerConnection = async (isInitiator: boolean) => {
@@ -334,6 +344,7 @@ function App() {
 
   const backToLobby = () => {
     closePeerConnection()
+    stopLocalMedia()
     setHasStarted(false)
     setStatus('idle')
     setIsCallConnected(false)
@@ -363,8 +374,7 @@ function App() {
 
     return () => {
       closePeerConnection()
-      localStreamRef.current?.getTracks().forEach((track) => track.stop())
-      localStreamRef.current = null
+      stopLocalMedia()
       const state = ws.readyState
       ws.onopen = null
       ws.onmessage = null
